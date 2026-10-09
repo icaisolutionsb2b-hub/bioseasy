@@ -498,6 +498,26 @@ def test_device_settings_test_notification_never_sends_a_real_message(env, monke
     assert sent["force"] is True
 
 
+def test_a_successful_test_clears_a_stale_delivery_warning(env, monkeypatch):
+    client, settings = env
+    make_admin_with_device(client, settings)
+    with conn_for(settings) as conn:
+        conn.execute(
+            "UPDATE devices SET last_alert_ok = 0, last_alert_error = 'Sending the notification timed out' "
+            "WHERE udid = ?",
+            (PHONE.udid,),
+        )
+    url = f"/devices/{PHONE.udid}"
+    assert "could not be delivered" in client.get(url).text
+
+    from bioseasy.ntfy import Result
+
+    monkeypatch.setattr("bioseasy.app.ntfy.send", lambda *a, **k: Result(ok=True))
+    r = client.post("/admin/notifications/test", data={"csrf": csrf(client, "/admin/notifications")})
+    assert "Test message sent" in r.text
+    assert "could not be delivered" not in client.get(url).text
+
+
 def test_admin_can_save_ntfy_settings_and_the_token_is_never_rendered(env):
     client, settings = env
     make_admin_with_device(client, settings)

@@ -171,3 +171,20 @@ def send(
     if response.status_code >= 400:
         return Result(False, f"The ntfy server answered HTTP {response.status_code}")
     return Result(True)
+
+
+def clear_failed_alerts(conn: sqlite3.Connection, udid: str | None = None) -> None:
+    """Drop a recorded delivery failure once the ntfy path has been shown to work again.
+
+    devices.last_alert_ok = 0 is otherwise only cleared by the next real alert for that device,
+    which can be a day away - and a failure recorded against an earlier notification setup (or an
+    earlier release's connectors) keeps warning on the device page long after it stopped being
+    true. A successful test, or newly saved settings, is the moment that warning becomes stale.
+    """
+    if udid is None:
+        conn.execute("UPDATE devices SET last_alert_ok = NULL, last_alert_error = NULL WHERE last_alert_ok = 0")
+    else:
+        conn.execute(
+            "UPDATE devices SET last_alert_ok = NULL, last_alert_error = NULL WHERE last_alert_ok = 0 AND udid = ?",
+            (udid,),
+        )

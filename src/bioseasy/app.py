@@ -1199,6 +1199,8 @@ def create_app(
             token=form.get("token", "").strip() or None,
             clear_token=bool(form.get("clear_token")),
         )
+        # Failures recorded against the previous settings say nothing about these ones.
+        ntfy.clear_failed_alerts(conn)
         return RedirectResponse("/admin/notifications?saved=1", status_code=303)
 
     @app.get("/admin/update")
@@ -2859,6 +2861,7 @@ def create_app(
             force=True,
         )
         if result.ok:
+            ntfy.clear_failed_alerts(conn, udid)
             return HTMLResponse('<p id="notify-test" class="flash">Test message sent.</p>')
         return HTMLResponse(f'<p id="notify-test" class="flash bad">{html.escape(result.error)}</p>')
 
@@ -3346,6 +3349,8 @@ def create_app(
             conn, settings.data_dir, "Test notification from bioseasy", "ntfy alerts from bioseasy work.", force=True
         )
         if result.ok:
+            # One topic carries every device's alerts, so a test that arrived proves it for all.
+            ntfy.clear_failed_alerts(conn)
             return HTMLResponse('<p id="notify-test" class="flash">Test message sent.</p>')
         return HTMLResponse(f'<p id="notify-test" class="flash bad">{html.escape(result.error)}</p>')
 

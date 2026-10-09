@@ -6,6 +6,14 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-09
+
+### Fixed
+- **A stale "last alert could not be delivered" warning clears itself.** A delivery failure stayed
+  on the device page until the next real alert for that device, even after the notification setup
+  had been fixed - including failures left over from the connectors 1.1.0 removed. A successful
+  ntfy test message, or saving the ntfy settings, now clears it.
+
 ## [1.1.0] - 2026-10-09
 
 This release is maintained in the icaisolutionsb2b-hub/bioseasy fork.

@@ -112,3 +112,17 @@ def test_failures_are_results_never_exceptions_and_never_echo_the_token(
 )
 def test_validate(server, topic, ok):
     assert (ntfy.validate(server, topic) == []) is ok
+
+
+def test_clear_failed_alerts_drops_only_failures(conn):
+    conn.execute("INSERT INTO devices (udid, name, last_alert_ok, last_alert_error) VALUES ('a', 'A', 0, 'timed out')")
+    conn.execute("INSERT INTO devices (udid, name, last_alert_ok) VALUES ('b', 'B', 1)")
+    conn.execute("INSERT INTO devices (udid, name, last_alert_ok, last_alert_error) VALUES ('c', 'C', 0, 'boom')")
+
+    ntfy.clear_failed_alerts(conn, "a")
+    rows = {r["udid"]: (r["last_alert_ok"], r["last_alert_error"]) for r in conn.execute("SELECT * FROM devices")}
+    assert rows == {"a": (None, None), "b": (1, None), "c": (0, "boom")}
+
+    ntfy.clear_failed_alerts(conn)
+    rows = {r["udid"]: r["last_alert_ok"] for r in conn.execute("SELECT * FROM devices")}
+    assert rows == {"a": None, "b": 1, "c": None}
