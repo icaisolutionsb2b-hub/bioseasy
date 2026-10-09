@@ -2,8 +2,9 @@
 """Secrets at rest: the ntfy access token.
 
 Encrypted with Fernet under `<data_dir>/connector.key` (the name it has always had), created on
-first use with mode 0600 and kept apart from the database file. Honest limit: this protects a copied or shared database file, not an attacker
-who can already read the whole data volume, since the key sits right next to the database there.
+first use with mode 0600 and kept apart from the database file. Honest limit: this protects a
+copied or shared database file, not an attacker who can already read the whole data volume, since
+the key sits right next to the database there.
 """
 
 from __future__ import annotations
