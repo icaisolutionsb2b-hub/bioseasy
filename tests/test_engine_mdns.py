@@ -103,3 +103,24 @@ def test_srv_without_a_matching_ptr_produces_no_instance():
     packet = _message([_rr(HOST, QTYPE_SRV, _srv_rdata(HOST, 32498)), a_record])
 
     assert mdns.assemble_instances([(packet, ("192.0.2.1", 5353))]) == []
+
+
+def test_bind_falls_back_to_an_ephemeral_port_when_5353_is_taken(monkeypatch):
+    """A host mDNS daemon holding 5353 exclusively (TrueNAS's avahi) made every browse raise
+    EADDRINUSE. The browse must fall back to a legacy-unicast query from an ephemeral port."""
+    real_socket = socket.socket
+    bound: list[tuple[str, int]] = []
+
+    class Picky(real_socket):
+        def bind(self, address):
+            if address[1] == 5353:
+                raise OSError(98, "Address already in use")
+            bound.append(address)
+            return super().bind(("127.0.0.1", 0))
+
+    monkeypatch.setattr(mdns.socket, "socket", Picky)
+    sock = mdns._bind_mdns_socket()
+    try:
+        assert bound == [("0.0.0.0", 0)]  # noqa: S104
+    finally:
+        sock.close()

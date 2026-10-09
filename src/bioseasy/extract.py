@@ -40,9 +40,14 @@ calls is `app.py`'s decision (in memory, bound to the session, with a short expi
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import plistlib
 import re
 import sqlite3
+import threading
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +77,48 @@ MAX_MANIFEST_BYTES = 512 * 1024 * 1024
 # How much of an encrypted payload is decrypted at a time. Large enough that a big file is not
 # thousands of round trips, small enough that memory stays flat whatever the file size.
 CHUNK_BYTES = 1024 * 1024
+
+# One click in the file browser opens the index several times (the areas column, one column per
+# folder level, the search column), and every open used to decrypt the whole Manifest.db again -
+# for a phone with a large backup, seconds of work and two or three copies of the index in memory
+# per click, inside a container with a 512 MB limit. The decrypted index is kept in memory for a
+# few minutes instead, for at most a couple of generations, and never written anywhere.
+_PLAIN_CACHE_TTL = 600.0
+_PLAIN_CACHE_SIZE = 2
+_plain_cache: dict[tuple, tuple[float, bytes]] = {}
+_keybag_cache: dict[tuple, tuple[float, object]] = {}
+_plain_cache_lock = threading.Lock()
+# Keys a cache entry to the password without keeping the password, or a plain hash of it, around.
+_cache_key_salt = os.urandom(32)
+
+
+def _plain_cache_key(db_path: Path, password: str) -> tuple:
+    stat = db_path.stat()
+    tag = hmac.new(_cache_key_salt, password.encode(), hashlib.sha256).digest()
+    return (str(db_path), stat.st_mtime_ns, stat.st_size, tag)
+
+
+def _cached_plain(key: tuple) -> bytes | None:
+    now = time.monotonic()
+    with _plain_cache_lock:
+        for stale in [k for k, (at, _) in _plain_cache.items() if now - at > _PLAIN_CACHE_TTL]:
+            del _plain_cache[stale]
+        hit = _plain_cache.get(key)
+        return hit[1] if hit else None
+
+
+def _remember_plain(key: tuple, plain: bytes) -> None:
+    with _plain_cache_lock:
+        _plain_cache[key] = (time.monotonic(), plain)
+        while len(_plain_cache) > _PLAIN_CACHE_SIZE:
+            del _plain_cache[min(_plain_cache, key=lambda k: _plain_cache[k][0])]
+
+
+def forget_decrypted_indexes() -> None:
+    """Drop every decrypted file index and unlocked keybag held in memory (the Lock button)."""
+    with _plain_cache_lock:
+        _plain_cache.clear()
+        _keybag_cache.clear()
 
 
 class ExtractError(Exception):
@@ -141,12 +188,26 @@ def _keybag(snapshot_dir: Path, password: str):
     from pyiosbackup.keybag import Keybag  # noqa: PLC0415
     from pyiosbackup.manifest_plist import ManifestPlist  # noqa: PLC0415
 
+    plist_path = snapshot_dir / "Manifest.plist"
     try:
-        manifest = ManifestPlist.from_path(snapshot_dir / "Manifest.plist")
-    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        key = _plain_cache_key(plist_path, password)
+        manifest = ManifestPlist.from_path(plist_path)
+    except (OSError, plistlib.InvalidFileException, ValueError, KeyError) as exc:
         raise ExtractError("This backup's manifest could not be read.") from exc
+    # Unlocking the keybag runs Apple's password derivation (PBKDF2, ten million rounds): seconds
+    # of CPU on a NAS, and it used to happen again for every column of every click and for every
+    # file downloaded. The unlocked keybag is kept as long as a decrypted index would be.
+    with _plain_cache_lock:
+        hit = _keybag_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] <= _PLAIN_CACHE_TTL:
+            return hit[1], manifest
     try:
-        return Keybag.from_manifest(manifest, password), manifest
+        keybag = Keybag.from_manifest(manifest, password)
+        with _plain_cache_lock:
+            _keybag_cache[key] = (time.monotonic(), keybag)
+            while len(_keybag_cache) > _PLAIN_CACHE_SIZE:
+                del _keybag_cache[min(_keybag_cache, key=lambda k: _keybag_cache[k][0])]
+        return keybag, manifest
     except InvalidUnwrap as exc:
         raise WrongPassword("That password does not open this backup.") from exc
     except Exception as exc:  # noqa: BLE001 - class name only; a keybag can hold key material
@@ -178,20 +239,41 @@ def _manifest_connection(snapshot_dir: Path, password: str | None = None) -> sql
     if db_path.stat().st_size > MAX_MANIFEST_BYTES:
         raise ExtractError("This backup's file index is too large to open.")
 
-    keybag, manifest = _keybag(snapshot_dir, password)
-    try:
-        plain = keybag.decrypt(db_path.read_bytes(), manifest.manifest_key)
-    except Exception as exc:  # noqa: BLE001 - class name only
-        raise ExtractError(f"The file index could not be decrypted ({exc.__class__.__name__}).") from exc
+    key = _plain_cache_key(db_path, password)
+    plain = _cached_plain(key)
+    if plain is None:
+        keybag, manifest = _keybag(snapshot_dir, password)
+        try:
+            plain = keybag.decrypt(db_path.read_bytes(), manifest.manifest_key)
+        except Exception as exc:  # noqa: BLE001 - class name only
+            raise ExtractError(f"The file index could not be decrypted ({exc.__class__.__name__}).") from exc
+        _remember_plain(key, plain)
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     try:
-        conn.deserialize(plain)
+        conn.deserialize(_without_wal(plain))
+        conn.execute("SELECT 1 FROM Files LIMIT 1").fetchall()
     except sqlite3.Error as exc:
         conn.close()
         raise ExtractError("The file index did not decrypt into a readable database.") from exc
     return conn
+
+
+def _without_wal(db: bytes) -> bytes:
+    """The same database with its header switched from WAL to rollback-journal mode.
+
+    iOS writes Manifest.db in WAL mode (header bytes 18 and 19 are 2). SQLite cannot open a WAL
+    database that only exists in memory, so every query on the deserialized copy failed with
+    "unable to open database file" and unlocking a real device's backup ended in a server error.
+    Bytes 18 and 19 are the file format read/write versions; 1 means legacy journal mode, and the
+    rest of the file is identical between the two.
+    """
+    if len(db) > 19 and db[18] == 2 and db[19] == 2:
+        patched = bytearray(db)
+        patched[18] = patched[19] = 1
+        return bytes(patched)
+    return db
 
 
 def _decoded_mbfile(blob: bytes | None):

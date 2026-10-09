@@ -64,7 +64,7 @@ def _matches(app, url: str, method: str) -> bool:
 def test_the_scan_finds_the_urls_it_is_meant_to_check():
     """A scan that finds nothing would pass forever; make sure it sees the known callers."""
     urls = {url for _file, url, _method in _urls()}
-    assert "/settings/notifications/push/subscribe" in urls
+    assert "/admin/notifications/test" in urls
     assert "/login" in urls
 
 

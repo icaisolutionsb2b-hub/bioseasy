@@ -169,12 +169,9 @@
 
 {% include "_netcheck.html" %}
 
-{% set scope = "device" %}
-{% set base_url = "/devices/" + device.udid %}
-{% include "_connectors_section.html" %}
-
-<h2>Test all notifications</h2>
-<p class="meta">Sends to every connector above and the admin alert connectors.</p>
+<h2>Notifications</h2>
+<p class="meta">Alerts for this device go to the ntfy topic set under
+  {% if user.is_admin %}<a href="/admin/notifications">Admin, Notifications</a>{% else %}Admin, Notifications{% endif %}.</p>
 <div id="notify-test">
   <form hx-post="/devices/{{ device.udid }}/settings/test-notification" hx-target="#notify-test" hx-swap="outerHTML">
     <input type="hidden" name="csrf" value="{{ csrf }}">

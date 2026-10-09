@@ -80,8 +80,8 @@ class Ticker:
         self._tz = tz
         self._mark_pair_used = mark_pair_used or (lambda _: None)
         # Fired once at the end of every tick, regardless of what the schedule decided (unlike
-        # `alert`, which only fires for an overdue/due nudge): runtime.py's MQTT publisher uses
-        # this so device ages stay fresh in Home Assistant even when nothing else happened. Must
+        # `alert`, which only fires for an overdue/due nudge), for anything that wants a regular
+        # heartbeat even when nothing else happened. Nothing in bioseasy itself uses it now. Must
         # never raise into tick() - see the try/except around its call at the end of tick() below.
         self._on_tick = on_tick
         # Both None in every existing caller that does not care about deep verification (most of

@@ -115,18 +115,18 @@ through bioseasy.
 
 bioseasy is published as a container image on the GitHub Container Registry:
 
-    ghcr.io/werk-xyz/bioseasy:latest
+    ghcr.io/icaisolutionsb2b-hub/bioseasy:latest
 
 Built for `linux/amd64` and `linux/arm64`, so a NAS or a small arm64 box runs the same image as a
-PC. Pulling needs no account. Pin a version instead of `latest` - `ghcr.io/werk-xyz/bioseasy:1.0.0`
-or `:1.0` - if you would rather decide yourself when to upgrade.
+PC. Pulling needs no account. Pin a version instead of `latest` - `ghcr.io/icaisolutionsb2b-hub/bioseasy:1.1.0`
+or `:1.1` - if you would rather decide yourself when to upgrade.
 
 To build it yourself instead, see [Building and releasing](building.md).
 
 ### Get the compose file
 
 ```sh
-git clone https://github.com/werk-xyz/bioseasy.git
+git clone https://github.com/icaisolutionsb2b-hub/bioseasy.git
 cd bioseasy
 ```
 
@@ -337,10 +337,8 @@ at `127.0.0.1:8080` (or whatever `BIOSEASY_PORT` is set to) on that same host.
 - **The web interface works**, once whoever uses it accepts the certificate in their browser.
 - **`BIOSEASY_SECURE_COOKIES=true` keeps working**: the `Secure` flag asks for HTTPS, not for a
   particular kind of certificate.
-- **Browser notifications and the home-screen web app need the certificate to be trusted**, not
-  merely accepted. Both rest on a service worker (`web/static/push-subscribe.js` registers
-  `/static/push-sw.js`), and a service worker only runs in what browsers call a secure context - a
-  TLS connection they consider authenticated.
+- **The home-screen web app needs the certificate to be trusted**, not merely accepted: it only
+  runs in what browsers call a secure context - a TLS connection they consider authenticated.
 
   Tested in Chrome: over plain `http://localhost` the service worker registers, and with a
   self-signed certificate Chrome shows its warning and loads nothing until somebody clicks through.

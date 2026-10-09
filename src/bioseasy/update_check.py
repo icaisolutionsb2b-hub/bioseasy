@@ -32,7 +32,7 @@ from . import db
 log = logging.getLogger("bioseasy")
 
 # Where releases are published. Empty disables the checker entirely, see module docstring.
-GITHUB_REPO = "werk-xyz/bioseasy"
+GITHUB_REPO = "icaisolutionsb2b-hub/bioseasy"
 
 _ENABLED_KEY = "update_check_enabled"
 _RESULT_KEY = "update_check_result"

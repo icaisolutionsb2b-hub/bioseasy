@@ -1,0 +1,79 @@
+# bioseasy as a TrueNAS SCALE / Community Edition Custom App.
+#
+# Apps -> Discover Apps -> (three dots) Install via YAML -> name it "bioseasy" -> paste this file,
+# after replacing every <PLACEHOLDER>:
+#
+#   <DATA_PATH>     a dataset for app state and pair records, e.g. /mnt/tank/apps/bioseasy
+#                   (keep it off the backup share: a pair record grants access to the device)
+#   <BACKUP_PATH>   a dataset for the backups themselves, e.g. /mnt/tank/backups/iphone
+#   <TLS_NAMES>     every name and IP address you open bioseasy at, comma separated,
+#                   e.g. nas.local,192.168.1.10
+#   <BASE_URL>      the address tapping an ntfy alert should open, e.g. https://nas.local:8080
+#   <TIMEZONE>      your time zone, e.g. Europe/Berlin - backup windows are local times
+#
+# Both datasets must be writable by user/group 568 (TrueNAS's "apps" user), the user below.
+# Two containers from one image: "bioseasy" serves the web UI, "worker" runs backups, discovery
+# and the schedule. Host networking is required: devices are found and reached on the real LAN.
+
+x-bioseasy: &bioseasy
+  image: ghcr.io/icaisolutionsb2b-hub/bioseasy:latest
+  pull_policy: always
+  restart: unless-stopped
+  network_mode: host
+  user: "568:568"
+  volumes:
+    - type: bind
+      source: <DATA_PATH>
+      target: /data
+    - type: bind
+      source: <BACKUP_PATH>
+      target: /backups
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+
+services:
+  bioseasy:
+    <<: *bioseasy
+    environment:
+      BIOSEASY_ENGINE: pymobiledevice3
+      BIOSEASY_PORT: "8080"
+      BIOSEASY_SECURE_COOKIES: "true"
+      BIOSEASY_TLS: self-signed
+      BIOSEASY_TLS_NAMES: <TLS_NAMES>
+      BIOSEASY_BASE_URL: <BASE_URL>
+      TZ: <TIMEZONE>
+      BIOSEASY_HELPER_URL_WINDOWS: https://github.com/icaisolutionsb2b-hub/bioseasy/releases/download/helper-v1.0.1/bioseasy-pair-windows-x64.exe
+      BIOSEASY_HELPER_URL_MACOS: https://github.com/icaisolutionsb2b-hub/bioseasy/releases/download/helper-v1.0.1/bioseasy-pair-macos-arm64.zip
+      BIOSEASY_HELPER_URL_LINUX: https://github.com/icaisolutionsb2b-hub/bioseasy/releases/download/helper-v1.0.1/bioseasy-pair-linux-x64
+    # Browsing an encrypted backup decrypts its file index in memory.
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-m", "bioseasy.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *bioseasy
+    command: ["bioseasy", "worker"]
+    environment:
+      BIOSEASY_ENGINE: pymobiledevice3
+      BIOSEASY_BASE_URL: <BASE_URL>
+      TZ: <TIMEZONE>
+    mem_limit: 768m
+    depends_on:
+      bioseasy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "bioseasy.healthcheck", "--worker"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s

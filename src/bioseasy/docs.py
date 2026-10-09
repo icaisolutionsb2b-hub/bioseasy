@@ -158,7 +158,7 @@ DESCRIPTIONS: dict[str, str] = {
     "pairing": "Let a device trust this server. Needed once per device, and it needs a computer with a cable.",
     "setup": "Turn on Wi-Fi backups and encryption for a device you have paired.",
     "restore": "Download one file out of a backup, or put a whole device back with Finder or iMazing.",
-    "notifications": "Be told when a backup fails: email, Telegram, Home Assistant, or a browser notification.",
+    "notifications": "Be told when a backup fails or needs your passcode, through ntfy.",
     "api": "Read device status or start a backup from a script, a cron job or an iOS Shortcut.",
 }
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import activity, auth, connectors, db, mqtt, notify, status, storage, webpush
+from . import activity, db, notify, ntfy, storage
 from . import defaults as backup_defaults
 from .config import Settings
 from .engine.base import Engine, EngineError, Transport
@@ -70,7 +70,6 @@ class Runtime:
     jobs: JobManager
     ticker: Ticker
     notify_event: Callable[[str, str, str], None]
-    notify_targets: Callable[[sqlite3.Connection, sqlite3.Row], list[str]]
     notify_storage_failed: Callable[[str], None]
     storage_check: Callable[[], storage.StorageCheck]
     global_defaults: Callable[[], backup_defaults.GlobalDefaults]
@@ -110,31 +109,9 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
             threshold = backup_defaults.get_global_defaults(conn).free_space_threshold_bytes
         return storage.check(settings.backup_root, root_id, threshold)
 
-    def notify_targets(conn: sqlite3.Connection, device: sqlite3.Row) -> list[str]:
-        admin_urls = connectors.apprise_urls_for(conn, settings.data_dir, "admin")
-        device_urls = connectors.apprise_urls_for(conn, settings.data_dir, "device", device["udid"])
-        seen = set(device_urls)
-        return device_urls + [u for u in admin_urls if u not in seen]
-
-    def push_targets(conn: sqlite3.Connection, device: sqlite3.Row | None) -> set[int]:
-        """Which users' browser subscriptions an event reaches: every admin (same reach as an
-        admin-scope Apprise connector) plus the device's own owner, if it has one -- the same
-        pairing notify_targets uses for email/Telegram, just addressed by user id instead of a
-        built URL, since a push subscription lives on the Settings page, not per device.
-        """
-        admin_ids = {row["id"] for row in auth.list_users(conn) if row["role"] == "admin"}
-        if device is not None and device["owner_id"] is not None:
-            admin_ids.add(device["owner_id"])
-        return admin_ids
-
-    def send_push(conn: sqlite3.Connection, user_ids: set[int], title: str, body: str, context: str) -> None:
-        # Never allowed to block or fail the caller: webpush.send_to_users already swallows every
-        # per-subscription failure, this is the outer safety net for anything it does not (a
-        # crashed VAPID load, an unexpected exception from the library itself).
-        try:
-            webpush.send_to_users(conn, settings.data_dir, user_ids, title, body)
-        except Exception:
-            log.warning("push notification (%s) failed", context, exc_info=True)
+    def device_link(udid: str) -> str | None:
+        """Where tapping a notification goes: the device page, when bioseasy knows its own address."""
+        return f"{settings.base_url.rstrip('/')}/devices/{udid}" if settings.base_url else None
 
     alert_locks: dict[str, threading.Lock] = {}
     alert_locks_guard = threading.Lock()
@@ -149,74 +126,31 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
             return alert_locks.setdefault(udid, threading.Lock())
 
     def notify_event(event: str, udid: str, message: str) -> None:
-        # Runs off the calling thread (the backup worker, or ticker.py's tick) so a slow SMTP
-        # server, webhook or push service can never delay or block a backup or a tick.
+        # Runs off the calling thread (the backup worker, or ticker.py's tick) so a slow or
+        # unreachable ntfy server can never delay or block a backup or a tick.
         def send_it() -> None:
             with closing(connect()) as conn:
                 device = conn.execute("SELECT * FROM devices WHERE udid = ?", (udid,)).fetchone()
-                if device is None:
+                if device is None or not ntfy.load(conn).ready:
                     return
-                urls = notify_targets(conn, device)
-                push_user_ids = push_targets(conn, device)
                 title, body = notify.message_for(
                     event, device["name"] or device["udid"], message, device["product_type"]
                 )
-                if urls:
-                    # Serialised per device, because two alerts for the same device can overlap
-                    # (ticker.py raising an overdue alert while jobs.py reports a backup outcome),
-                    # and each thread writes its own verdict when its own send returns. Run
-                    # concurrently, the slower one lands last: a stale failure then overwrites the
-                    # newer success and the device page reports a failed delivery for an alert
-                    # that did arrive. Serialising makes "most recently written" and "most recent
-                    # send" the same statement. The wait is bounded by notify.send's own timeout,
-                    # and this is a background thread, so no tick or backup waits on it.
-                    # The write belongs inside the lock, not merely the send: serialising the send
-                    # alone still lets both threads race to write afterwards, which is the very
-                    # defect this guards against.
-                    with alert_lock(udid):
-                        result = notify.send(urls, title, body)
-                        if not result.ok:
-                            log.warning("notification for device %s (%s) failed: %s", udid, event, result.error)
-                        # Recorded only now, after the send actually returned - never at the moment
-                        # the alert was merely handed off - so devices.last_alert_ok reflects what
-                        # was observed to happen, not what was hoped for. A timestamp that means
-                        # "the user was told" is only written when the telling actually happened.
-                        # Covers every notify_event caller (ticker.py's
-                        # nudge/overdue/upcoming alerts and jobs.py's run-outcome notifications
-                        # alike), since all of them share this one send path and the same honesty
-                        # requirement applies to each.
-                        conn.execute(
-                            "UPDATE devices SET last_alert_ok = ?, last_alert_error = ?, "
-                            "last_alert_at = ? WHERE udid = ?",
-                            (1 if result.ok else 0, None if result.ok else result.error, _now(), udid),
-                        )
-                if push_user_ids:
-                    send_push(conn, push_user_ids, title, body, f"device {udid} ({event})")
+                # Serialised per device: two alerts for the same device can overlap (an overdue
+                # alert from the tick while a backup reports its outcome), and the verdict written
+                # below must belong to the most recent send, not whichever thread finished last.
+                with alert_lock(udid):
+                    result = ntfy.send(conn, settings.data_dir, title, body, event=event, click=device_link(udid))
+                    if not result.ok:
+                        log.warning("notification for device %s (%s) failed: %s", udid, event, result.error)
+                    # Recorded only once the send actually returned, so devices.last_alert_ok
+                    # reflects what was observed to happen, not what was hoped for.
+                    conn.execute(
+                        "UPDATE devices SET last_alert_ok = ?, last_alert_error = ?, last_alert_at = ? WHERE udid = ?",
+                        (1 if result.ok else 0, None if result.ok else result.error, _now(), udid),
+                    )
 
         threading.Thread(target=send_it, name=f"notify-{udid}", daemon=True).start()
-        # Every device's state, not just this one: simplest way to keep the MQTT payload built
-        # from one shared query (status.for_admin), the same rule the API follows. Only for a run
-        # actually finishing - "waiting_for_passcode", "overdue" and "due" fire notify_event too,
-        # but republishing on those would not change anything MQTT hasn't already published on
-        # the next tick.
-        if event in ("succeeded", "failed", "not_confirmed"):
-            threading.Thread(target=mqtt_publish_all, name="mqtt-publish", daemon=True).start()
-
-    def mqtt_publish_all() -> None:
-        # A broker that is down, unreachable or misconfigured must never break a backup or a
-        # tick (see mqtt.py's module docstring): every failure is caught here, and only the
-        # exception's class name is logged, never its text, which could echo the broker host or
-        # an auth error built from the password.
-        try:
-            with closing(connect()) as conn:
-                cfg = mqtt.load_config(conn, settings.data_dir)
-                if cfg is None or not cfg.enabled:
-                    return
-                now = datetime.now(UTC)
-                statuses = [status.to_public(s) for s in status.for_admin(conn, settings.backup_root, now)]
-            mqtt.publish_all(cfg, statuses, now)
-        except Exception as exc:
-            log.warning("mqtt publish failed: %s", type(exc).__name__)
 
     def notify_storage_failed(message: str) -> None:
         """A backup could not start because the volume is below its free-space threshold.
@@ -237,23 +171,14 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
                     last_dt = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
                     if now - last_dt < STORAGE_ALERT_COOLDOWN:
                         return
-                urls = connectors.apprise_urls_for(conn, settings.data_dir, "admin")
-                push_user_ids = push_targets(conn, None)
-                if not urls and not push_user_ids:
+                if not ntfy.load(conn).ready:
                     return
                 title, body = notify.message_for("storage_failed", "the backup volume", message)
-                sent = False
-                if urls:
-                    result = notify.send(urls, title, body)
-                    if result.ok:
-                        sent = True
-                    else:
-                        log.warning("storage alert notification failed: %s", result.error)
-                if push_user_ids:
-                    send_push(conn, push_user_ids, title, body, "storage_failed")
-                    sent = True
-                if sent:
+                result = ntfy.send(conn, settings.data_dir, title, body, event="storage_failed")
+                if result.ok:
                     db.set_setting(conn, key, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+                else:
+                    log.warning("storage alert notification failed: %s", result.error)
 
         threading.Thread(target=send_it, name="notify-storage", daemon=True).start()
 
@@ -283,9 +208,6 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
         mark_setup_confirmed=mark_setup_confirmed,
     )
 
-    def on_tick() -> None:
-        threading.Thread(target=mqtt_publish_all, name="mqtt-publish-tick", daemon=True).start()
-
     ticker = Ticker(
         connect,
         engine,
@@ -295,7 +217,6 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
         settings.backup_root,
         storage_check,
         mark_pair_used=mark_pair_used,
-        on_tick=on_tick,
     )
     return Runtime(
         settings=settings,
@@ -304,7 +225,6 @@ def build(settings: Settings, engine: Engine | None = None, *, worker_id: str | 
         jobs=jobs,
         ticker=ticker,
         notify_event=notify_event,
-        notify_targets=notify_targets,
         notify_storage_failed=notify_storage_failed,
         storage_check=storage_check,
         global_defaults=global_defaults,

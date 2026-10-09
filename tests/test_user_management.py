@@ -41,31 +41,6 @@ def conn_for(settings):
     return closing(db.connect(settings.data_dir / "bioseasy.db"))
 
 
-EMAIL_SETTINGS = {
-    "label": "Admin mail",
-    "host": "smtp.example.com",
-    "port": 587,
-    "security": "starttls",
-    "username": "bioseasy",
-    "from_addr": "bioseasy@example.com",
-    "to": ["admin@example.com"],
-}
-
-
-def _email_connector(conn, data_dir):
-    from bioseasy import connectors
-
-    connectors.create_connector(
-        conn,
-        scope="admin",
-        udid=None,
-        kind="email",
-        label="Admin mail",
-        settings=EMAIL_SETTINGS,
-        secret_ciphertext=connectors.encrypt_secret(data_dir, "smtp-password"),
-    )
-
-
 def test_an_account_can_be_created_with_an_email_address(env):
     """The address is optional and never an identity - the account is still addressed by its
     username (SCHEMA_VERSION 19)."""
@@ -132,33 +107,6 @@ def test_a_malformed_email_is_refused_and_the_form_keeps_what_was_typed(env):
     assert 'value="dave"' in r.text and "not-an-address" in r.text
     with conn_for(settings) as conn:
         assert conn.execute("SELECT 1 FROM users WHERE username = 'dave'").fetchone() is None
-
-
-def test_no_invitation_is_built_without_an_email_connector(env):
-    """Creating an account never depends on mail being configured: with no connector there is
-    simply no URL to send to, and the account is created all the same."""
-    from bioseasy import connectors
-
-    client, settings = env
-    with conn_for(settings) as conn:
-        assert connectors.email_invite_url(conn, settings.data_dir, "bob@example.com") is None
-
-
-def test_the_invitation_goes_to_the_new_address_not_the_connector_s_own(env):
-    """The one place bioseasy mails an address that is in no stored configuration: the connector's
-    server and credentials are reused, only the recipient is replaced. The connector's own
-    recipients must not receive it."""
-    from bioseasy import connectors
-
-    client, settings = env
-    with conn_for(settings) as conn:
-        _email_connector(conn, settings.data_dir)
-        url = connectors.email_invite_url(conn, settings.data_dir, "bob@example.com")
-
-    assert url is not None
-    assert "bob%40example.com" in url or "bob@example.com" in url
-    assert "admin%40example.com" not in url and "admin@example.com" not in url
-    assert "smtp.example.com" in url  # same server as the connector
 
 
 def login(client, username, password=PASSWORD):

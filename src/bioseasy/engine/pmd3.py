@@ -393,12 +393,18 @@ class Pmd3Engine:
                 found[lockdown.udid] = self._seen(lockdown, Transport.USB)
             finally:
                 await lockdown.close()
-        async for _address, lockdown in self._wifi_lockdowns(on_pair_used=on_pair_used):
-            try:
-                if lockdown.udid not in found:
-                    found[lockdown.udid] = self._seen(lockdown, Transport.WIFI)
-            finally:
-                await lockdown.close()
+        # A Bonjour failure (a socket that cannot be opened, a broken interface) must not also hide
+        # devices on a fixed address below: on a host whose own mDNS daemon held UDP 5353, every
+        # tick raised here and the scheduler never saw a device it could reach perfectly well.
+        try:
+            async for _address, lockdown in self._wifi_lockdowns(on_pair_used=on_pair_used):
+                try:
+                    if lockdown.udid not in found:
+                        found[lockdown.udid] = self._seen(lockdown, Transport.WIFI)
+                finally:
+                    await lockdown.close()
+        except (OSError, PyMobileDevice3Exception) as exc:
+            log.warning("Bonjour discovery failed, checking fixed addresses only: %s", exc)
         # A device on a fixed address (typically another subnet, so Bonjour never sees it) is
         # otherwise never 'reachable' for the scheduler and ticker (ticker.py's `seen` mapping),
         # even though _connect can reach it on demand. One short, single-attempt probe per
@@ -750,9 +756,11 @@ class Pmd3Engine:
             return None
         finally:
             await lockdown.close()
-        if info is None or "IsCharging" not in info:
+        if not info or not any(k in info for k in ("IsCharging", "ExternalConnected", "FullyCharged")):
             return None
-        return bool(info["IsCharging"])
+        # A phone at 100% on the charger reports IsCharging = False (it has stopped charging) but
+        # ExternalConnected = True. "Only while charging" means "on the charger", so either counts.
+        return bool(info.get("IsCharging") or info.get("ExternalConnected"))
 
     async def _will_encrypt_now(self, udid: str) -> bool:
         """Reconnect once and re-read WillEncrypt after a ChangePassword call that raised

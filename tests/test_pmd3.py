@@ -298,6 +298,33 @@ def test_discover_reports_a_fixed_address_device_over_wifi(tmp_path, monkeypatch
     assert FakeLockdown.closed
 
 
+def test_discover_still_probes_fixed_address_when_bonjour_fails(tmp_path, monkeypatch):
+    """TrueNAS's avahi-daemon holds UDP 5353, so the Bonjour browse raised EADDRINUSE on every
+    tick. That must not hide a device on a fixed address from the scheduler."""
+
+    class PairedLockdown(FakeLockdown):
+        udid = UDID
+        all_values = {"DeviceName": "iPhone", "ProductType": "iPhone16,1", "ProductVersion": "26.0"}
+
+    async def no_usb():
+        return []
+
+    async def broken_bonjour(wanted=None, on_pair_used=None):
+        raise OSError(98, "Address already in use")
+        yield  # pragma: no cover - makes this an async generator
+
+    async def fake_create_using_tcp(*, hostname, autopair, pair_record):
+        return PairedLockdown()
+
+    e = pmd3.Pmd3Engine(tmp_path, fixed_hosts=lambda: {UDID: "192.0.2.9"})
+    monkeypatch.setattr(e, "_usb_serials", no_usb)
+    monkeypatch.setattr(e, "_wifi_lockdowns", broken_bonjour)
+    monkeypatch.setattr(pmd3.pairing, "load", lambda records, udid: {"fake": "record"})
+    monkeypatch.setattr(pmd3, "create_using_tcp", fake_create_using_tcp)
+
+    assert [d.udid for d in asyncio.run(e._discover())] == [UDID]
+
+
 def test_discover_skips_an_unpaired_fixed_address_device(tmp_path, monkeypatch):
     class UnpairedLockdown(FakeLockdown):
         paired = False

@@ -80,11 +80,6 @@
   </ol>
 {%- endmacro %}
 
-{# Notification connector field sets, shared by the "add a connector" forms and each existing
-   connector's edit form: `v` is a flat dict of string fields (either a freshly submitted form or
-   connectors.form_defaults() for a saved connector), so both call sites can use the same macro.
-   Secrets are never read back into the page: a set secret shows a placeholder, and the field
-   stays empty until the user types a new value. #}
 {# One list of validation errors at the top of a form, with an id so the form itself can point
    at it via aria-describedby (see below). The errors this project's routes return are
    form-level, not field-level (validate_device_settings and friends return a flat list of
@@ -122,49 +117,3 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro secret_hint(secret_set) -%}
-  {% if secret_set %}set; leave blank to keep it{% else %}not set{% endif %}
-{%- endmacro %}
-
-{% macro email_fields(v, secret_set) -%}
-  <label>Label <input name="label" value="{{ v.label|default('') }}" maxlength="64" required></label>
-  <label>SMTP host <input name="host" value="{{ v.host|default('') }}" maxlength="255" required></label>
-  <label>SMTP port <input name="port" type="number" min="1" max="65535" value="{{ v.port|default('587') }}" required></label>
-  <label>Security
-    <select name="security">
-      {% for opt, txt in [("none", "None"), ("starttls", "STARTTLS"), ("tls", "TLS")] %}
-      <option value="{{ opt }}" {% if (v.security|default('starttls')) == opt %}selected{% endif %}>{{ txt }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label>SMTP username <small>(optional)</small>
-    <input name="username" value="{{ v.username|default('') }}" maxlength="254" autocomplete="off">
-  </label>
-  <label>SMTP password <small>(optional, {{ secret_hint(secret_set) }})</small>
-    <input name="password" type="password" autocomplete="new-password">
-  </label>
-  <label>From address <input name="from_addr" type="email" value="{{ v.from_addr|default('') }}" required></label>
-  <label>Recipient addresses <small>(one per line)</small>
-    <textarea name="to" rows="2" spellcheck="false">{{ v.to|default('') }}</textarea>
-  </label>
-{%- endmacro %}
-
-{% macro telegram_fields(v, secret_set) -%}
-  <label>Label <input name="label" value="{{ v.label|default('') }}" maxlength="64" required></label>
-  <label>Bot token <small>({{ secret_hint(secret_set) }})</small>
-    <input name="bot_token" autocomplete="off" placeholder="123456789:AA-your-token">
-  </label>
-  <label>Chat id <small>(numeric, or @channel)</small>
-    <input name="chat_id" value="{{ v.chat_id|default('') }}" required>
-  </label>
-  <label>Topic id <small>(optional)</small>
-    <input name="topic_id" type="number" min="1" value="{{ v.topic_id|default('') }}">
-  </label>
-{%- endmacro %}
-
-{% macro apprise_fields(v, secret_set) -%}
-  <label>Label <input name="label" value="{{ v.label|default('') }}" maxlength="64" required></label>
-  <label>Apprise URL <small>({{ secret_hint(secret_set) }})</small>
-    <input name="url" autocomplete="off">
-  </label>
-{%- endmacro %}

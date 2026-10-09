@@ -7,11 +7,11 @@ import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from bioseasy import connectors, db
-from bioseasy import notify as notify_mod
+from bioseasy import db, ntfy
+from bioseasy import ntfy as notify_mod
 from bioseasy.config import Settings
 from bioseasy.engine.demo import DemoEngine
-from bioseasy.notify import NotifyResult
+from bioseasy.ntfy import Result as NotifyResult
 from bioseasy.runtime import build as build_runtime
 
 
@@ -34,21 +34,15 @@ def _settings(tmp_path):
 def _add_admin_connector(rt):
     with closing(rt.connect()) as conn:
         db.migrate(conn)
-        connectors.create_connector(
-            conn,
-            scope="admin",
-            udid=None,
-            kind="apprise",
-            label="test",
-            settings={},
-            secret_ciphertext=connectors.encrypt_secret(rt.settings.data_dir, "json://192.0.2.1:1/hook"),
+        ntfy.save(
+            conn, rt.settings.data_dir, enabled=True, server="https://ntfy.invalid", topic="bioseasy-test", token=None
         )
 
 
 def test_notify_storage_failed_sends_and_sets_the_throttle_key(tmp_path, monkeypatch):
     sent = []
 
-    def fake_send(urls, title, body):
+    def fake_send(conn, data_dir, title, body, **kwargs):
         sent.append((title, body))
         return NotifyResult(True)
 
@@ -80,12 +74,10 @@ def _add_device(rt, udid="dead-beef-0000", name="Anna's iPhone"):
 def test_notify_event_failure_is_logged_where_the_user_can_see_it_without_the_secret(tmp_path, monkeypatch, caplog):
     """A failing send must not vanish silently: runtime.notify_event logs a warning naming the
     device and event, the only place a failure is currently recorded (there is no per-connector
-    failure state in the UI). The secret behind the connector (here a fake Telegram-shaped
-    Apprise URL) must never appear in that log record."""
-    secret_url = "tgram://123456789:super-secret-bot-token/@channel"
+    failure state in the UI). The ntfy access token must never appear in that log record."""
+    secret = "tk_super-secret-access-token"
 
-    def fake_send(urls, title, body):
-        assert urls == [secret_url]
+    def fake_send(conn, data_dir, title, body, **kwargs):
         return NotifyResult(False, error="Sending the notification timed out")
 
     monkeypatch.setattr(notify_mod, "send", fake_send)
@@ -94,14 +86,8 @@ def test_notify_event_failure_is_logged_where_the_user_can_see_it_without_the_se
     rt = build_runtime(settings, DemoEngine(step_seconds=0))
     udid = _add_device(rt)
     with closing(rt.connect()) as conn:
-        connectors.create_connector(
-            conn,
-            scope="admin",
-            udid=None,
-            kind="apprise",
-            label="test",
-            settings={},
-            secret_ciphertext=connectors.encrypt_secret(rt.settings.data_dir, secret_url),
+        ntfy.save(
+            conn, rt.settings.data_dir, enabled=True, server="https://ntfy.invalid", topic="bioseasy-test", token=secret
         )
 
     with caplog.at_level("WARNING", logger="bioseasy"):
@@ -109,15 +95,14 @@ def test_notify_event_failure_is_logged_where_the_user_can_see_it_without_the_se
         assert _wait_for(lambda: any("overdue" in r.message for r in caplog.records))
 
     log_text = "\n".join(r.message for r in caplog.records)
-    assert "super-secret-bot-token" not in log_text
-    assert secret_url not in log_text
+    assert secret not in log_text
     assert udid in log_text or udid[:8] in log_text
 
 
 def test_notify_storage_failed_is_throttled_within_the_cooldown(tmp_path, monkeypatch):
     sent = []
 
-    def fake_send(urls, title, body):
+    def fake_send(conn, data_dir, title, body, **kwargs):
         sent.append((title, body))
         return NotifyResult(True)
 

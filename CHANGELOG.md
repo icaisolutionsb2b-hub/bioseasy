@@ -6,6 +6,36 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-09
+
+This release is maintained in the icaisolutionsb2b-hub/bioseasy fork.
+
+### Fixed
+- **Scheduled backups start again on hosts with their own mDNS daemon.** TrueNAS (and any host
+  running avahi with `disallow-other-stacks`) holds UDP 5353 exclusively, so every scheduled check
+  failed with "Address already in use" and the scheduler never saw a device. Discovery now falls
+  back to legacy-unicast mDNS queries from an ephemeral port (RFC 6762 section 6.7), and a
+  Bonjour failure no longer hides a device on a fixed address.
+- **"Only while charging" no longer blocks a phone that is full or cannot say.** A phone at 100%
+  on the charger reports `IsCharging = false`; being on external power now counts, and only a
+  confirmed "not on the charger" blocks a scheduled start.
+- **The setup checklist stays finished.** It judged the first backup from the live backup folder,
+  which is half-written while a backup runs and after one fails, so "Setup incomplete" kept
+  coming back. Any backup that ever succeeded now completes that step.
+- **Browsing an encrypted backup works on a real iPhone backup.** iOS writes `Manifest.db` in WAL
+  mode, which SQLite cannot open from memory; unlocking ended in "Internal Server Error". The
+  decrypted file index and the unlocked keybag are also kept for a few minutes instead of being
+  rebuilt - with ten million rounds of key derivation - for every column of every click.
+- urllib3 2.8.0 (CVE-2026-97687, CVE-2026-97689).
+
+### Changed
+- **Alerts go through [ntfy](https://ntfy.sh) only**: one server, topic and optional access token
+  under Admin -> Notifications.
+
+### Removed
+- Email and Telegram connectors, raw Apprise URLs, browser push notifications, account
+  invitation emails, and the Home Assistant MQTT integration.
+
 ## [1.0.1] - 2026-09-25
 
 ### Added

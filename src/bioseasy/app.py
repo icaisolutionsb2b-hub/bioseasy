@@ -43,7 +43,6 @@ from . import (
     api,
     auth,
     browse,
-    connectors,
     db,
     demo_seed,
     devices,
@@ -56,8 +55,7 @@ from . import (
     inventory,
     logview,
     mountinfo,
-    mqtt,
-    notify,
+    ntfy,
     oidc,
     pairing,
     password_check,
@@ -69,7 +67,6 @@ from . import (
     tokens,
     update_check,
     verify,
-    webpush,
 )
 from . import defaults as backup_defaults
 from .config import Settings, load
@@ -413,7 +410,13 @@ def device_kind(product_type: str | None) -> str:
     return "iPhone"
 
 
-def setup_incomplete(device: sqlite3.Row, backup) -> bool:
+def ever_backed_up(conn: sqlite3.Connection, udid: str) -> bool:
+    """Whether any backup of this device has ever finished successfully."""
+    row = conn.execute("SELECT 1 FROM runs WHERE udid = ? AND status = 'succeeded' LIMIT 1", (udid,)).fetchone()
+    return row is not None
+
+
+def setup_incomplete(device: sqlite3.Row, backup, backed_up: bool = False) -> bool:
     """Whether the assisted setup wizard (docs/setup.md) still has an open step for `device`.
 
     `backup` is the BackupInfo device_summary() already read from disk (or None without one),
@@ -421,12 +424,18 @@ def setup_incomplete(device: sqlite3.Row, backup) -> bool:
     backup directory twice. "Paired" is not checked here: every row in `devices` was only ever
     inserted once a pair record existed (add_submit, add_device_from_pairing, add_pair_record),
     so it is never the open step.
+
+    `backed_up` is whether any run ever succeeded (ever_backed_up). The live backup directory alone
+    is not enough to judge step 4: it is rewritten by every backup, so while one runs, and after
+    one fails partway, its Status.plist is not "finished" - and the setup checklist used to come
+    back on the device page each time, however often the owner had already finished it.
     """
     wifi_and_encryption = device["wifi_enabled_at"] and device["encryption_enabled_at"]
-    return not (wifi_and_encryption and backup is not None and backup.complete)
+    first_backup_done = backed_up or (backup is not None and backup.complete)
+    return not (wifi_and_encryption and first_backup_done)
 
 
-def setup_state(device: sqlite3.Row, backup) -> str:
+def setup_state(device: sqlite3.Row, backup, backed_up: bool = False) -> str:
     """ "done", "unconfirmed" or "open" - which is not the same question as `setup_incomplete`.
 
     The two timestamps are written when bioseasy itself switched Wi-Fi backups or encryption on,
@@ -441,7 +450,7 @@ def setup_state(device: sqlite3.Row, backup) -> str:
     encrypted or it is not - while the Wi-Fi flag cannot be read off a backup, which is exactly why
     this is "unconfirmed" and not "done".
     """
-    if not setup_incomplete(device, backup):
+    if not setup_incomplete(device, backup, backed_up):
         return "done"
     settled = backup is not None and backup.complete and backup.encrypted
     if settled and not (device["wifi_enabled_at"] and device["encryption_enabled_at"]):
@@ -486,9 +495,8 @@ def create_app(
         built_tasks.detect_setup_step,
         built_tasks.verify_snapshot,
     )
-    connect, notify_targets, storage_check, tz = (
+    connect, storage_check, tz = (
         rt.connect,
-        rt.notify_targets,
         rt.storage_check,
         rt.tz,
     )
@@ -749,11 +757,6 @@ def create_app(
         context.setdefault("update_check_repo_configured", False)
         context.setdefault("update_check_enabled", False)
         context.setdefault("update_check_result", None)
-        # admin_settings.html only; defaulted here for the same reason as the connector context
-        # above, so an error-path render() call does not need to repeat these.
-        context.setdefault("mqtt_settings", {})
-        context.setdefault("mqtt_password_set", False)
-        context.setdefault("mqtt_errors", [])
         context["csrf"] = request.session.get("csrf", "")
         context["cookie_will_be_dropped"] = cookie_will_be_dropped(request)
         context["demo_mode"] = demo_autologin
@@ -762,33 +765,6 @@ def create_app(
         context.update(header_storage_context())
         context.update(header_activity_context(context["user"]))
         return templates.TemplateResponse(request, name, context, status_code=status_code)
-
-    def connectors_context(conn: sqlite3.Connection, scope: str, udid: str | None = None) -> list[dict]:
-        return [connectors.connector_public(r) for r in connectors.list_connectors(conn, scope, udid)]
-
-    def validate_connector_form(kind: str, form: dict) -> connectors.ConnectorForm:
-        if kind not in connectors.KINDS:
-            raise HTTPException(status_code=404)
-        result = connectors.VALIDATORS[kind](form)
-        if result.secret == "" and kind in connectors.REQUIRED_SECRET_LABEL:
-            result.errors.append(connectors.REQUIRED_SECRET_LABEL[kind])
-        return result
-
-    def connector_test_response(row: sqlite3.Row) -> HTMLResponse:
-        target = f"notify-test-{row['id']}"
-        try:
-            secret = (
-                connectors.decrypt_secret(settings.data_dir, row["secret_ciphertext"])
-                if row["secret_ciphertext"] is not None
-                else None
-            )
-            url = connectors.build_apprise_url(row["kind"], json.loads(row["settings_json"]), secret)
-        except (connectors.ConnectorSecretError, ValueError) as exc:
-            return HTMLResponse(f'<p id="{target}" class="flash bad">{html.escape(str(exc))}</p>')
-        result = notify.send([url], "Test notification from bioseasy", f"This is a test message for {row['label']}.")
-        if result.ok:
-            return HTMLResponse(f'<p id="{target}" class="flash">Test message sent.</p>')
-        return HTMLResponse(f'<p id="{target}" class="flash bad">{html.escape(result.error)}</p>')
 
     def device_summary(conn: sqlite3.Connection, device: sqlite3.Row) -> dict:
         # Read running state from the runs row rather than JobManager.state(): backups run in a
@@ -845,6 +821,7 @@ def create_app(
                     f"run after {stall_minutes} min without data."
                 )
         pair_days = status.pair_days_unused(device["paired_at"], device["pair_used_at"], datetime.now(UTC))
+        backed_up = ever_backed_up(conn, device["udid"])
         return {
             "device": device,
             "runs": runs,
@@ -855,8 +832,9 @@ def create_app(
             "run_running_for": run_running_for,
             "run_last_data": run_last_data,
             "run_stall_hint": run_stall_hint,
-            "setup_incomplete": setup_incomplete(device, backup if has_backup else None),
-            "setup_state": setup_state(device, backup if has_backup else None),
+            "setup_incomplete": setup_incomplete(device, backup if has_backup else None, backed_up),
+            "setup_state": setup_state(device, backup if has_backup else None, backed_up),
+            "first_backup_done": backed_up or (has_backup and backup.complete),
             "pair_days_unused": pair_days,
             "pair_warning": status.pair_warning(pair_days),
             "pair_expired": pair_days is not None and pair_days >= status.PAIR_EXPIRED_DAYS,
@@ -1133,10 +1111,6 @@ def create_app(
             "api_tokens": tokens.list_for_user(conn, user.id),
             "has_password": auth.has_password(conn, user.id),
             "min_password_length": auth.MIN_PASSWORD_LENGTH,
-            "push_subscriptions": webpush.list_for_user(conn, user.id),
-            "push_available": webpush.vapid_status(settings.data_dir),
-            "push_vapid_public_key": webpush.public_key_b64url(settings.data_dir),
-            "push_status": webpush.push_delivery_status(conn, user.id),
         }
 
     # The Admin area's sub-pages, in the order they appear in its section nav: everything
@@ -1159,7 +1133,6 @@ def create_app(
         ("/settings", "Password"),
         ("/settings/sso", "Single sign-on"),
         ("/settings/tokens", "API tokens"),
-        ("/settings/notifications", "Browser notifications"),
     )
 
     # The two things an admin can mean by "the log". They are
@@ -1188,10 +1161,45 @@ def create_app(
             devices=visible_devices(conn, user),
             admin_nav=ADMIN_NAV,
             saved=request.query_params.get("saved") == "1",
-            connectors=connectors_context(conn, "admin"),
-            mqtt_settings=mqtt.form_defaults(mqtt.stored_settings(conn) or {}),
-            mqtt_password_set=mqtt.password_set(conn),
+            ntfy_config=ntfy.load(conn),
+            ntfy_errors=[],
+            ntfy_values={},
         )
+
+    @app.post("/admin/notifications/ntfy")
+    def admin_ntfy_save(
+        request: Request,
+        form: dict = Depends(csrf_form),
+        user: auth.User = Depends(admin_user),
+        conn: sqlite3.Connection = Depends(get_conn),
+    ):
+        """Saves the ntfy server, topic and access token. A blank token field keeps the stored one."""
+        server = form.get("server", "").strip() or ntfy.DEFAULT_SERVER
+        topic = form.get("topic", "").strip()
+        errors = ntfy.validate(server, topic)
+        if errors:
+            return render(
+                request,
+                "admin_notifications.html",
+                status_code=400,
+                user=user,
+                devices=visible_devices(conn, user),
+                admin_nav=ADMIN_NAV,
+                saved=False,
+                ntfy_config=ntfy.load(conn),
+                ntfy_errors=errors,
+                ntfy_values=form,
+            )
+        ntfy.save(
+            conn,
+            settings.data_dir,
+            enabled=bool(form.get("enabled")),
+            server=server,
+            topic=topic,
+            token=form.get("token", "").strip() or None,
+            clear_token=bool(form.get("clear_token")),
+        )
+        return RedirectResponse("/admin/notifications?saved=1", status_code=303)
 
     @app.get("/admin/update")
     def admin_update_page(
@@ -1220,12 +1228,6 @@ def create_app(
         request: Request, user: auth.User = Depends(current_user), conn: sqlite3.Connection = Depends(get_conn)
     ):
         return render(request, "settings_tokens.html", **account_context(conn, user))
-
-    @app.get("/settings/notifications")
-    def settings_notifications_page(
-        request: Request, user: auth.User = Depends(current_user), conn: sqlite3.Connection = Depends(get_conn)
-    ):
-        return render(request, "settings_notifications.html", **account_context(conn, user))
 
     def _moved_to(new_path: str):
         """One redirect handler for an address that moved when the admin area was introduced."""
@@ -1338,48 +1340,6 @@ def create_app(
         if not tokens.revoke(conn, user.id, token_id):
             raise HTTPException(status_code=404)
         return RedirectResponse("/settings/tokens", status_code=303)
-
-    @app.post("/settings/notifications/push/subscribe")
-    def account_push_subscribe(
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        """Stores a browser's PushSubscription (push-subscribe.js posts endpoint/p256dh/auth as a plain
-        form after `PushManager.subscribe()` succeeds). 400, not a crash, for a malformed or
-        incomplete post -- the subscribe button is client-side JavaScript, not something the
-        server ever fully trusts.
-        """
-        endpoint, p256dh, auth_key = form.get("endpoint", ""), form.get("p256dh", ""), form.get("auth", "")
-        if not endpoint or not p256dh or not auth_key:
-            raise HTTPException(status_code=400, detail="Incomplete push subscription")
-        try:
-            webpush.save_subscription(
-                conn,
-                user.id,
-                webpush.Subscription(endpoint=endpoint, p256dh=p256dh, auth=auth_key),
-                form.get("label", ""),
-            )
-        except webpush.ForeignSubscriptionError:
-            # 409, not a hint about who the endpoint actually belongs to (same reasoning as the
-            # 404-not-403 shape elsewhere): a signed-in user must not be able to take over
-            # another user's push subscription just by knowing its endpoint URL.
-            raise HTTPException(status_code=409, detail="This push subscription cannot be used here") from None
-        return render(request, "settings_notifications.html", push_subscribed=True, **account_context(conn, user))
-
-    @app.post("/settings/notifications/push/{subscription_id}/revoke")
-    def account_push_revoke(
-        subscription_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        # 404, not 403, for a foreign subscription id: same shape as tokens.revoke/oidc.unlink.
-        if not webpush.revoke(conn, user.id, subscription_id):
-            raise HTTPException(status_code=404)
-        return RedirectResponse("/settings/notifications", status_code=303)
 
     @app.post("/settings/sso/link")
     async def account_oidc_link(
@@ -1540,7 +1500,9 @@ def create_app(
         udid = device["udid"]
         backup_path = settings.backup_root / udid
         backup = inventory.read_backup(backup_path, with_size=False) if backup_path.is_dir() else None
-        if not setup_incomplete(device, backup):
+        with closing(rt.connect()) as conn:
+            backed_up = ever_backed_up(conn, udid)
+        if not setup_incomplete(device, backup, backed_up):
             return
         if not setup_detect_due(rt, udid):
             return
@@ -2450,6 +2412,7 @@ def create_app(
         visible_device(conn, user, udid)
         forget_backup_passwords(request, udid)
         forget_selections(request, udid)
+        extract.forget_decrypted_indexes()
         return RedirectResponse(f"/devices/{udid}/files", status_code=303)
 
     def _download_headers(name: str) -> dict:
@@ -2624,7 +2587,6 @@ def create_app(
             "devices": visible_devices(conn, user),
             "current_udid": udid,
             "device": device,
-            "connectors": connectors_context(conn, "device", udid),
             "global_defaults": backup_defaults.get_global_defaults(conn),
             "retention_defaults": backup_defaults.get_global_defaults(conn).retention,
             "retention_preview": retention_preview(udid, policy),
@@ -2710,7 +2672,6 @@ def create_app(
                 current_udid=udid,
                 device=merged,
                 errors=errors,
-                connectors=connectors_context(conn, "device", udid),
                 retention_mode=retention_mode,
                 interval_mode=form.get("interval_mode", "default"),
                 window_mode=form.get("window_mode", "default"),
@@ -2838,7 +2799,6 @@ def create_app(
                 current_udid=udid,
                 device=device,
                 saved=False,
-                connectors=connectors_context(conn, "device", udid),
                 global_defaults=global_defaults,
                 retention_defaults=global_defaults.retention,
                 retention_preview=retention_preview(udid, device_policy(conn, device)),
@@ -2891,135 +2851,16 @@ def create_app(
         conn: sqlite3.Connection = Depends(get_conn),
     ):
         device = visible_device(conn, user, udid)
-        urls = notify_targets(conn, device)
-        if not urls:
-            return HTMLResponse('<p id="notify-test" class="flash bad">No notification URLs are saved yet.</p>')
-        title, body = (
+        result = ntfy.send(
+            conn,
+            settings.data_dir,
             "Test notification from bioseasy",
             f"This is a test message for {device['name'] or device['udid']}.",
+            force=True,
         )
-        result = notify.send(urls, title, body)
         if result.ok:
             return HTMLResponse('<p id="notify-test" class="flash">Test message sent.</p>')
         return HTMLResponse(f'<p id="notify-test" class="flash bad">{html.escape(result.error)}</p>')
-
-    @app.post("/devices/{udid}/connectors/{kind}")
-    def device_connector_create(
-        udid: str,
-        kind: str,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        device = visible_device(conn, user, udid)
-        result = validate_connector_form(kind, form)
-        if result.errors:
-            return render(
-                request,
-                "device_settings.html",
-                status_code=400,
-                user=user,
-                devices=visible_devices(conn, user),
-                current_udid=udid,
-                device=device,
-                connectors=connectors_context(conn, "device", udid),
-                create_errors={kind: result.errors},
-                create_values={kind: form},
-                global_defaults=backup_defaults.get_global_defaults(conn),
-                retention_defaults=backup_defaults.get_global_defaults(conn).retention,
-                retention_preview=retention_preview(udid, device_policy(conn, device)),
-                **field_modes(device),
-                **password_change_context(conn, device),
-            )
-        secret_ciphertext = connectors.encrypt_secret(settings.data_dir, result.secret) if result.secret else None
-        connectors.create_connector(
-            conn,
-            scope="device",
-            udid=udid,
-            kind=kind,
-            label=result.label,
-            settings=result.settings,
-            secret_ciphertext=secret_ciphertext,
-        )
-        return RedirectResponse(f"/devices/{udid}/settings?saved=1", status_code=303)
-
-    @app.post("/devices/{udid}/connectors/{connector_id}/edit")
-    def device_connector_update(
-        udid: str,
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        device = visible_device(conn, user, udid)
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "device" or row["udid"] != udid:
-            raise HTTPException(status_code=404)
-        result = connectors.VALIDATORS[row["kind"]](form)
-        if result.errors:
-            return render(
-                request,
-                "device_settings.html",
-                status_code=400,
-                user=user,
-                devices=visible_devices(conn, user),
-                current_udid=udid,
-                device=device,
-                connectors=connectors_context(conn, "device", udid),
-                edit_error_id=connector_id,
-                edit_errors=result.errors,
-                edit_values=form,
-                global_defaults=backup_defaults.get_global_defaults(conn),
-                retention_defaults=backup_defaults.get_global_defaults(conn).retention,
-                retention_preview=retention_preview(udid, device_policy(conn, device)),
-                **field_modes(device),
-                **password_change_context(conn, device),
-            )
-        secret_ciphertext = (
-            connectors.encrypt_secret(settings.data_dir, result.secret) if result.secret else row["secret_ciphertext"]
-        )
-        connectors.update_connector(
-            conn,
-            connector_id,
-            label=result.label,
-            settings=result.settings,
-            secret_ciphertext=secret_ciphertext,
-            enabled=bool(form.get("enabled")),
-        )
-        return RedirectResponse(f"/devices/{udid}/settings?saved=1", status_code=303)
-
-    @app.post("/devices/{udid}/connectors/{connector_id}/delete")
-    def device_connector_delete(
-        udid: str,
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        visible_device(conn, user, udid)
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "device" or row["udid"] != udid:
-            raise HTTPException(status_code=404)
-        connectors.delete_connector(conn, connector_id)
-        return RedirectResponse(f"/devices/{udid}/settings?saved=1", status_code=303)
-
-    @app.post("/devices/{udid}/connectors/{connector_id}/test")
-    def device_connector_test(
-        udid: str,
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(current_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        visible_device(conn, user, udid)
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "device" or row["udid"] != udid:
-            raise HTTPException(status_code=404)
-        return connector_test_response(row)
 
     @app.get("/add")
     def add_page(request: Request, user: auth.User = Depends(admin_user), conn: sqlite3.Connection = Depends(get_conn)):
@@ -3451,14 +3292,11 @@ def create_app(
             user=user,
             devices=visible_devices(conn, user),
             saved=request.query_params.get("saved") == "1",
-            connectors=connectors_context(conn, "admin"),
             global_defaults=global_defaults,
             retention_defaults=global_defaults.retention,
             update_check_repo_configured=bool(update_check.GITHUB_REPO),
             update_check_enabled=update_check.is_enabled(conn),
             update_check_result=update_check.last_result(conn),
-            mqtt_settings=mqtt.form_defaults(mqtt.stored_settings(conn) or {}),
-            mqtt_password_set=mqtt.password_set(conn),
         )
 
     @app.post("/admin/defaults")
@@ -3476,7 +3314,6 @@ def create_app(
                 status_code=400,
                 user=user,
                 devices=visible_devices(conn, user),
-                connectors=connectors_context(conn, "admin"),
                 errors=errors,
                 global_defaults=backup_defaults.get_global_defaults(conn),
                 retention_defaults=backup_defaults.get_global_defaults(conn).retention,
@@ -3505,160 +3342,12 @@ def create_app(
         user: auth.User = Depends(admin_user),
         conn: sqlite3.Connection = Depends(get_conn),
     ):
-        urls = connectors.apprise_urls_for(conn, settings.data_dir, "admin")
-        if not urls:
-            return HTMLResponse('<p id="notify-test" class="flash bad">No notification URLs are saved yet.</p>')
-        result = notify.send(urls, "Test notification from bioseasy", "This is a test message for the admin alerts.")
+        result = ntfy.send(
+            conn, settings.data_dir, "Test notification from bioseasy", "ntfy alerts from bioseasy work.", force=True
+        )
         if result.ok:
             return HTMLResponse('<p id="notify-test" class="flash">Test message sent.</p>')
         return HTMLResponse(f'<p id="notify-test" class="flash bad">{html.escape(result.error)}</p>')
-
-    @app.post("/admin/notifications/connectors/{kind}")
-    def admin_connector_create(
-        kind: str,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        result = validate_connector_form(kind, form)
-        if result.errors:
-            return render(
-                request,
-                "admin_notifications.html",
-                status_code=400,
-                user=user,
-                devices=visible_devices(conn, user),
-                connectors=connectors_context(conn, "admin"),
-                create_errors={kind: result.errors},
-                create_values={kind: form},
-                global_defaults=backup_defaults.get_global_defaults(conn),
-                retention_defaults=backup_defaults.get_global_defaults(conn).retention,
-            )
-        secret_ciphertext = connectors.encrypt_secret(settings.data_dir, result.secret) if result.secret else None
-        connectors.create_connector(
-            conn,
-            scope="admin",
-            udid=None,
-            kind=kind,
-            label=result.label,
-            settings=result.settings,
-            secret_ciphertext=secret_ciphertext,
-        )
-        return RedirectResponse("/admin/notifications?saved=1", status_code=303)
-
-    @app.post("/admin/notifications/connectors/{connector_id}/edit")
-    def admin_connector_update(
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "admin":
-            raise HTTPException(status_code=404)
-        result = connectors.VALIDATORS[row["kind"]](form)
-        if result.errors:
-            return render(
-                request,
-                "admin_notifications.html",
-                status_code=400,
-                user=user,
-                devices=visible_devices(conn, user),
-                connectors=connectors_context(conn, "admin"),
-                edit_error_id=connector_id,
-                edit_errors=result.errors,
-                edit_values=form,
-                global_defaults=backup_defaults.get_global_defaults(conn),
-                retention_defaults=backup_defaults.get_global_defaults(conn).retention,
-            )
-        secret_ciphertext = (
-            connectors.encrypt_secret(settings.data_dir, result.secret) if result.secret else row["secret_ciphertext"]
-        )
-        connectors.update_connector(
-            conn,
-            connector_id,
-            label=result.label,
-            settings=result.settings,
-            secret_ciphertext=secret_ciphertext,
-            enabled=bool(form.get("enabled")),
-        )
-        return RedirectResponse("/admin/notifications?saved=1", status_code=303)
-
-    @app.post("/admin/notifications/connectors/{connector_id}/delete")
-    def admin_connector_delete(
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "admin":
-            raise HTTPException(status_code=404)
-        connectors.delete_connector(conn, connector_id)
-        return RedirectResponse("/admin/notifications?saved=1", status_code=303)
-
-    @app.post("/admin/notifications/mqtt")
-    def admin_mqtt_submit(
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        result = mqtt.validate_form(form)
-        if result.errors:
-            global_defaults = backup_defaults.get_global_defaults(conn)
-            return render(
-                request,
-                "admin_notifications.html",
-                status_code=400,
-                user=user,
-                devices=visible_devices(conn, user),
-                connectors=connectors_context(conn, "admin"),
-                global_defaults=global_defaults,
-                retention_defaults=global_defaults.retention,
-                mqtt_settings=form,
-                mqtt_password_set=mqtt.password_set(conn),
-                mqtt_errors=result.errors,
-            )
-        mqtt.save_config(conn, settings.data_dir, result.settings, result.secret)
-        return RedirectResponse("/admin/notifications?saved=1", status_code=303)
-
-    @app.post("/admin/notifications/mqtt/test")
-    def admin_mqtt_test(
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        cfg = mqtt.load_config(conn, settings.data_dir)
-        if cfg is None or not cfg.host:
-            return HTMLResponse('<p id="mqtt-test" class="flash bad">Save the broker settings first.</p>')
-        statuses = [status.to_public(s) for s in status.for_admin(conn, settings.backup_root, datetime.now(UTC))]
-        try:
-            mqtt.publish_all(cfg, statuses)
-        except Exception as exc:
-            # Never the exception's own text: it can echo the broker host or an auth failure
-            # built from the password (mqtt.py's module docstring).
-            return HTMLResponse(
-                f'<p id="mqtt-test" class="flash bad">Publish failed: {html.escape(type(exc).__name__)}</p>'
-            )
-        return HTMLResponse('<p id="mqtt-test" class="flash">Test state published.</p>')
-
-    @app.post("/admin/notifications/connectors/{connector_id}/test")
-    def admin_connector_test(
-        connector_id: int,
-        request: Request,
-        form: dict = Depends(csrf_form),
-        user: auth.User = Depends(admin_user),
-        conn: sqlite3.Connection = Depends(get_conn),
-    ):
-        row = connectors.get_connector(conn, connector_id)
-        if row is None or row["scope"] != "admin":
-            raise HTTPException(status_code=404)
-        return connector_test_response(row)
 
     @app.get("/admin/logs")
     def logs_page(
@@ -3720,46 +3409,11 @@ def create_app(
             filter_device=device,
         )
 
-    def send_invitation(conn: sqlite3.Connection, recipient: str, base_url: str) -> None:
-        """Tell a newly created account's owner that it exists, if an email connector can carry it.
-
-        The URL is built here, on the request's own connection, and only the send itself runs on a
-        detached thread: that thread must never touch a connection the request is about to close.
-        Creating the account never depends on this - the account exists before this is called, and
-        a broken or missing mail setup leaves a log line, not a failed creation.
-
-        The message carries a link and nothing else. Never the initial password: the admin who
-        typed it passes it on themselves, through whatever channel they trust.
-        """
-        url = connectors.email_invite_url(conn, settings.data_dir, recipient)
-        if url is None:
-            return
-
-        def send_it() -> None:
-            try:
-                result = notify.send(
-                    [url],
-                    "Your bioseasy account",
-                    f"An account has been created for you on this bioseasy server: {base_url}/login\n"
-                    "Your password was set by the administrator who created the account; ask them for it.",
-                )
-                if not result.ok:
-                    # Short, secret-free text from NotifyResult, and never the recipient address.
-                    log.warning("invitation could not be sent: %s", result.error)
-            except Exception as exc:
-                log.warning("invitation could not be sent (%s)", type(exc).__name__)
-
-        threading.Thread(target=send_it, name="invite", daemon=True).start()
-
     def users_context(conn: sqlite3.Connection, **extra) -> dict:
         return {
             "local_users": auth.list_users(conn),
             "admin_count": auth.admin_count(conn),
             "min_password_length": auth.MIN_PASSWORD_LENGTH,
-            # Whether an invitation could go out at all, so the email field says which it is
-            # instead of promising a mail that no configured connector could send.
-            "invite_possible": connectors.email_invite_url(conn, settings.data_dir, "probe@example.invalid")
-            is not None,
             # Accounts from before an address was required. Nothing can fill these in on its own -
             # no address exists for them and none may be invented - so the page asks.
             "users_without_email": auth.users_without_email(conn),
@@ -3810,8 +3464,6 @@ def create_app(
                 },
                 **users_context(conn),
             )
-        if email:
-            send_invitation(conn, email, resolve_base_url(settings, request))
         return RedirectResponse("/admin/users?saved=1", status_code=303)
 
     @app.post("/admin/users/{user_id}/email")

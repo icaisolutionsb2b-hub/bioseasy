@@ -14,7 +14,7 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 
-from bioseasy import _diagnose, auth, connectors, db, defaults, diagnostics
+from bioseasy import _diagnose, auth, db, defaults, diagnostics, ntfy
 from bioseasy.app import create_app
 from bioseasy.config import Settings, load
 from bioseasy.engine.demo import DEMO_DEVICES, DemoEngine
@@ -59,27 +59,9 @@ def plant_secrets(settings: Settings) -> None:
             "INSERT INTO sightings (udid, seen_at, transport) VALUES (?, '2026-01-01T00:00:00Z', 'wifi')",
             (UDID,),
         )
-        # A connector's secret (here a Telegram bot token) lives encrypted at rest, but the plain
-        # value passes through this same process on the way in; diagnostics must never see it.
-        secret = connectors.encrypt_secret(settings.data_dir, FAKE_BOT_TOKEN)
-        connectors.create_connector(
-            conn,
-            scope="device",
-            udid=UDID,
-            kind="telegram",
-            label="Alice's Telegram",
-            settings={"chat_id": "-100111111", "topic_id": None},
-            secret_ciphertext=secret,
-        )
-        connectors.create_connector(
-            conn,
-            scope="admin",
-            udid=None,
-            kind="telegram",
-            label="Admin Telegram",
-            settings={"chat_id": "-100222222", "topic_id": None},
-            secret_ciphertext=secret,
-        )
+        # The ntfy access token lives encrypted at rest, but the plain value passes through this
+        # same process on the way in; diagnostics must never see it.
+        ntfy.save(conn, settings.data_dir, enabled=True, server="https://ntfy.example", topic="t", token=FAKE_BOT_TOKEN)
 
 
 def assert_no_secrets(text: str) -> None:

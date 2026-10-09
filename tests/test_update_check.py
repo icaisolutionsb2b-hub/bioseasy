@@ -196,4 +196,4 @@ def test_toggle_route_is_a_noop_while_repo_is_unset(env, monkeypatch):
 def test_the_release_build_checks_the_published_repository():
     """1.0.0 is the first public release, so the shipped default names where it is published.
     Until then this was empty and the update check was dead code in every installation."""
-    assert update_check.GITHUB_REPO == "werk-xyz/bioseasy"
+    assert update_check.GITHUB_REPO == "icaisolutionsb2b-hub/bioseasy"

@@ -411,3 +411,25 @@ def test_a_selected_path_cannot_reach_another_area(tmp_path):
 
     assert escaped == []
     assert wildcard == []  # the LIKE wildcard is escaped, so "%" is a literal folder name
+
+
+def test_an_encrypted_wal_mode_index_opens(tmp_path):
+    """iOS writes Manifest.db in WAL mode. Deserialized into memory as-is, SQLite could not read
+    it ("unable to open database file") and unlocking a real backup ended in a server error."""
+    backup = make_backup(tmp_path, encrypted=True)
+    with sqlite3.connect(":memory:") as probe:
+        probe.execute("SELECT 1")
+    plain_header = extract._without_wal(b"SQLite format 3\x00" + b"\x00\x00" + b"\x02\x02" + b"\x00" * 80)
+    assert plain_header[18:20] == b"\x01\x01"
+
+    assert extract.domains(backup.path, BACKUP_PASSWORD) == [("HomeDomain", 2), ("CameraRollDomain", 1)]
+
+
+def test_an_unreadable_index_is_an_error_message_not_a_crash(tmp_path, monkeypatch):
+    backup = make_backup(tmp_path, encrypted=True)
+    extract.forget_decrypted_indexes()
+    monkeypatch.setattr(extract, "_without_wal", lambda db: b"\x00" * len(db))
+
+    with pytest.raises(extract.ExtractError):
+        extract.domains(backup.path, BACKUP_PASSWORD)
+    extract.forget_decrypted_indexes()

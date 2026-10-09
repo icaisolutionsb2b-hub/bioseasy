@@ -6,7 +6,7 @@
 {% set enc_done = device.encryption_enabled_at %}
 {% set enc_running = encryption_action and encryption_action.state == "running" %}
 {% set enc_failed = encryption_action and encryption_action.state == "failed" %}
-{% set backup_done = s.backup and s.backup.complete %}
+{% set backup_done = s.first_backup_done %}
 {% set all_done = wifi_done and enc_done and backup_done %}
 {% set detecting = setup_detect and setup_detect.state == "running" %}
 {% set detect_unreachable = setup_detect and setup_detect.state == "done" and setup_detect.message %}

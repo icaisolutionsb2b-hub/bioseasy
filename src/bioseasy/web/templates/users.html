@@ -92,9 +92,7 @@
   <label>Username
     <input name="username" maxlength="64" required value="{{ create_values.username if create_values else '' }}">
   </label>
-  <label>Email <small>(required; single sign-on matches an identity to an account by its address{% if invite_possible %},
-    and an invitation with a link to this server is sent to it{% else %}. No email connector is set up, so no
-    invitation can be sent yet{% endif %})</small>
+  <label>Email <small>(required; single sign-on matches an identity to an account by its address)</small>
     <input name="email" type="email" maxlength="254" autocomplete="off" required
       value="{{ create_values.email if create_values else '' }}">
   </label>

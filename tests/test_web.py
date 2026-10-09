@@ -484,24 +484,44 @@ def test_device_settings_test_notification_never_sends_a_real_message(env, monke
     make_admin_with_device(client, settings)
     sent = {}
 
-    def fake_send(urls, title, body):
-        sent["urls"], sent["title"], sent["body"] = urls, title, body
-        from bioseasy.notify import NotifyResult
+    def fake_send(conn, data_dir, title, body, **kwargs):
+        sent["title"], sent["body"], sent["force"] = title, body, kwargs.get("force")
+        from bioseasy.ntfy import Result
 
-        return NotifyResult(ok=True)
+        return Result(ok=True)
 
-    monkeypatch.setattr("bioseasy.app.notify.send", fake_send)
+    monkeypatch.setattr("bioseasy.app.ntfy.send", fake_send)
     url = f"/devices/{PHONE.udid}/settings"
-    # Notifications go through notification_connectors only now (docs/notifications.md); add one
-    # rather than a legacy free-text field.
-    client.post(
-        f"/devices/{PHONE.udid}/connectors/apprise",
-        data={"csrf": csrf(client, url), "label": "Raw webhook", "url": "json://localhost"},
-    )
     r = client.post(f"/devices/{PHONE.udid}/settings/test-notification", data={"csrf": csrf(client, url)})
     assert r.status_code == 200
     assert "Test message sent" in r.text
-    assert sent["urls"] == ["json://localhost"]
+    assert sent["force"] is True
+
+
+def test_admin_can_save_ntfy_settings_and_the_token_is_never_rendered(env):
+    client, settings = env
+    make_admin_with_device(client, settings)
+    page = "/admin/notifications"
+    r = client.post(
+        "/admin/notifications/ntfy",
+        data={
+            "csrf": csrf(client, page),
+            "enabled": "1",
+            "server": "https://ntfy.example",
+            "topic": "my-topic",
+            "token": "tk_planted_secret",
+        },
+        follow_redirects=True,
+    )
+    assert r.status_code == 200
+    assert "my-topic" in r.text and "https://ntfy.example/my-topic" in r.text
+    assert "tk_planted_secret" not in r.text
+
+    bad = client.post(
+        "/admin/notifications/ntfy",
+        data={"csrf": csrf(client, page), "server": "not a url", "topic": "x"},
+    )
+    assert bad.status_code == 400
 
 
 def test_member_cannot_reach_admin_settings(env):

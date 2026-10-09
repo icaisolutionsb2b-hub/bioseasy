@@ -117,12 +117,12 @@ def test_due_but_outside_window():
     assert "outside the scheduled window" in d.reason
 
 
-def test_charging_required_and_unknown_does_not_satisfy_it():
+def test_charging_required_blocks_only_a_confirmed_not_charging():
     device = _view(last_success_at=NOW - timedelta(hours=25), only_when_charging=True)
     unknown = decide(device, NOW, UTC, reachable=True, charging=None)
     not_charging = decide(device, NOW, UTC, reachable=True, charging=False)
     charging = decide(device, NOW, UTC, reachable=True, charging=True)
-    assert unknown.start_backup is False
+    assert unknown.start_backup is True
     assert not_charging.start_backup is False
     assert charging.start_backup is True
 

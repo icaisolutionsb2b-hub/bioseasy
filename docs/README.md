@@ -15,7 +15,7 @@ stays in the repository.
 | [Pairing a device](pairing.md) | The one-time trust step, and the four ways to do it. |
 | [Setup wizard](setup.md) | The four steps per device, and what each one changes on the device. |
 | [Restoring a backup](restore.md) | Getting data back, with Finder, iMazing or pymobiledevice3. |
-| [Notifications](notifications.md) | Email, Telegram, browser notifications, Home Assistant over MQTT. |
+| [Notifications](notifications.md) | Alerts through ntfy. |
 | [Status API](api.md) | Read-only API and tokens, including the Shortcuts recipe. |
 | [Troubleshooting](troubleshooting.md) | Symptom first, subsystem second. |
 

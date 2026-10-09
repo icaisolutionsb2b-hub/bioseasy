@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""One status per device, shared by the web UI, the read-only API, MQTT and Home Assistant.
+"""One status per device, shared by the web UI and the read-only API.
 
 Scoping happens in the SQL query, not by filtering a full list afterwards, and there is no
 parameter that widens it: `for_owner` can only ever return that owner's devices, `for_admin` is a
@@ -155,7 +155,7 @@ def _status(
 
 
 def to_public(status: DeviceStatus) -> dict:
-    """JSON-safe, the same keys for the API, MQTT state payloads and Home Assistant."""
+    """JSON-safe, the same keys for the API and the web UI."""
     return {
         "udid": status.udid,
         "name": status.name,

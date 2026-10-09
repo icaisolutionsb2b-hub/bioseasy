@@ -155,8 +155,8 @@ def decide(
     pre-attempt notice, right now.
 
     now_utc must be aware and in UTC; tz is the device owner's local time zone, used only to
-    evaluate the scheduling window. charging is None when the engine cannot tell; per
-    docs/concept.md an unknown charging state does not satisfy "only while charging".
+    evaluate the scheduling window. charging is None when the engine cannot tell; an unknown
+    charging state does not block "only while charging", only a confirmed False does.
     notice_lead_minutes is the global default (defaults.DEFAULT_NOTICE_LEAD_MINUTES), not a
     per-device setting, so callers pass it in rather than it living on DeviceView.
     """
@@ -167,7 +167,11 @@ def decide(
 
     now_local = now_utc.astimezone(tz)
     inside_window = in_window(now_local, device.window_start, device.window_end)
-    charging_ok = not device.only_when_charging or charging is True
+    # Only a confirmed "not on the charger" blocks. The charging probe is not available over
+    # every Wi-Fi session, and treating unknown as "no" meant a device that could not answer it
+    # was never backed up on schedule at all; the owner still confirms every backup with the
+    # passcode, so starting on an unknown state costs nothing.
+    charging_ok = not device.only_when_charging or charging is not False
 
     attempt_allowed = False
     if inside_window:
@@ -210,7 +214,7 @@ def decide(
     elif not attempt_allowed:
         reason = "Due, inside the window, but the next scheduled attempt has not arrived yet."
     elif not charging_ok:
-        reason = "Due, but charging is required and the device is not confirmed to be charging."
+        reason = "Due, but charging is required and the device is not on the charger."
     else:
         reason = "Due, but blocked."
     if overdue:

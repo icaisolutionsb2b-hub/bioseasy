@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import socket
 import struct
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ from pymobiledevice3.bonjour import (
 )
 
 MOBDEV2_SERVICE_NAME = "_apple-mobdev2._tcp.local."
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -141,19 +143,39 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
         self._queue.put_nowait((data, addr))
 
 
-async def _open_ipv4_socket() -> tuple[asyncio.DatagramTransport, socket.socket, asyncio.Queue]:
-    queue: asyncio.Queue[tuple[bytes, Any]] = asyncio.Queue()
-    # Receiving mDNS answers means listening on UDP 5353 on every interface (RFC 6762); the socket
-    # only reads multicast replies to our own query and never serves anything.
+def _bind_mdns_socket() -> socket.socket:
+    """A UDP socket for one browse: on 5353 when it can be shared, otherwise on an ephemeral port.
+
+    Receiving multicast answers means listening on UDP 5353 on every interface (RFC 6762). That
+    fails with EADDRINUSE when the host's own mDNS responder holds 5353 exclusively - TrueNAS's
+    avahi-daemon does (`disallow-other-stacks`), and with host networking that is the same port.
+    RFC 6762 section 6.7 covers exactly this case: a query sent from a port other than 5353 is a
+    "legacy unicast" query, and responders (iOS's mDNSResponder included) answer it by unicast
+    straight back to the source port, so an ephemeral port still receives the device's reply.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # nosemgrep: avoid-bind-to-all-interfaces
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if hasattr(socket, "SO_REUSEPORT"):
         with contextlib.suppress(OSError):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(("0.0.0.0", MDNS_PORT))  # noqa: S104 - mDNS itself is inherently all-interfaces
+    try:
+        sock.bind(("0.0.0.0", MDNS_PORT))  # noqa: S104 - mDNS itself is inherently all-interfaces
+    except OSError as exc:
+        sock.close()
+        log.info("UDP %d is held by another mDNS responder (%s); browsing with unicast replies", MDNS_PORT, exc)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", 0))  # noqa: S104
+        return sock
     mreq = struct.pack("=4s4s", socket.inet_aton(MDNS_MCAST_V4), socket.inet_aton("0.0.0.0"))  # noqa: S104
     with contextlib.suppress(OSError):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    return sock
+
+
+async def _open_ipv4_socket() -> tuple[asyncio.DatagramTransport, socket.socket, asyncio.Queue]:
+    queue: asyncio.Queue[tuple[bytes, Any]] = asyncio.Queue()
+    # The socket only reads replies to our own query and never serves anything.
+    sock = _bind_mdns_socket()
     loop = asyncio.get_running_loop()
     transport, _ = await loop.create_datagram_endpoint(lambda: _DatagramProtocol(queue), sock=sock)
     return transport, sock, queue

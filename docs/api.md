@@ -73,7 +73,7 @@ route only queues the run, it does not enter the passcode for you.
 
 ## Device object
 
-The same shape `status.to_public` produces for the web UI and for MQTT. No
+The same shape `status.to_public` produces for the web UI. No
 secrets and no locations: no notification URLs, no fixed address, no pair record, no backup path.
 
 ```json
@@ -124,6 +124,4 @@ interactive docs, as before.
 
 ## Home Assistant
 
-Home Assistant can read this API with its RESTful sensor or command_line integration. The simpler
-route is usually the MQTT connector (see [Notifications](notifications.md)), whose discovery
-messages make the entities appear on their own.
+Home Assistant can read this API with its RESTful sensor or command_line integration.

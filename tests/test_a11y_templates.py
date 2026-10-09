@@ -530,21 +530,6 @@ def test_device_settings_error_state_keeps_values_and_has_described_error_list(e
     assert described, "form must reference the error list via aria-describedby"
 
 
-def test_connectors_add_error_has_described_error_list(env):
-    client, settings = env
-    make_admin_with_device(client, settings)
-    url = f"/devices/{PHONE.udid}/settings"
-    token = csrf(client, url)
-    r = client.post(
-        f"/devices/{PHONE.udid}/connectors/email",
-        data={"csrf": token, "label": "", "host": "", "port": "", "from_addr": "not-an-email"},
-    )
-    page_text = r.text if r.status_code != 303 else client.get(url).text
-    assert_page_a11y(page_text, context="device_settings.html (connector add error)")
-    assert 'id="connector-add-errors-email"' in page_text
-    assert 'aria-describedby="connector-add-errors-email"' in page_text
-
-
 def test_password_change_fragment_a11y(env):
     client, settings = env
     make_admin_with_device(client, settings)
@@ -665,11 +650,10 @@ def test_admin_settings_page_a11y(env):
     login(client, "admin")
     page = client.get("/admin/defaults").text
     assert_page_a11y(page, context="admin_settings.html")
-    # Connectors moved to their own Admin page, so the empty state belongs there
-    # now, not on Defaults.
+    # Alerts live on their own Admin page, not on Defaults.
     notifications = client.get("/admin/notifications").text
     assert_page_a11y(notifications, context="admin_notifications.html")
-    assert "No connectors yet." in notifications
+    assert 'name="topic"' in notifications
 
 
 def test_admin_settings_error_state_has_described_error_list(env):
@@ -1004,7 +988,6 @@ SETTINGS_PAGES = (
     ("/settings", "account.html"),
     ("/settings/sso", "settings_sso.html"),
     ("/settings/tokens", "settings_tokens.html"),
-    ("/settings/notifications", "settings_notifications.html"),
 )
 
 

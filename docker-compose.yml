@@ -15,7 +15,7 @@
 # cross Docker's bridge network.
 
 x-bioseasy: &bioseasy
-  image: ${BIOSEASY_IMAGE:-ghcr.io/werk-xyz/bioseasy:latest}
+  image: ${BIOSEASY_IMAGE:-ghcr.io/icaisolutionsb2b-hub/bioseasy:latest}
   network_mode: host
   restart: unless-stopped
   # Every setting in .env reaches the container. Without this line, compose only read .env to fill

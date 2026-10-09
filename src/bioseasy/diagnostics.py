@@ -55,7 +55,6 @@ def _versions() -> dict[str, str]:
         "bioseasy": _package_version("bioseasy"),
         "python": platform.python_version(),
         "pymobiledevice3": _package_version("pymobiledevice3"),
-        "apprise": _package_version("apprise"),
         "fastapi": _package_version("fastapi"),
     }
 

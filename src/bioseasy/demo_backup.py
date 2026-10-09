@@ -39,6 +39,7 @@ import plistlib
 import sqlite3
 import struct
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -268,7 +269,11 @@ def write_realistic_backup(
     if write_manifest_db:
         db_path = path / "Manifest.db"
         db_path.unlink(missing_ok=True)
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn:
+            # A device writes Manifest.db in WAL mode (header bytes 18 and 19 are 2), and reading
+            # one back has its own pitfalls (extract._without_wal), so the fixture does the same.
+            # Closing the connection checkpoints the log into the main file and removes it.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 "CREATE TABLE Files (fileID TEXT PRIMARY KEY, domain TEXT, relativePath TEXT, flags INTEGER, file BLOB)"
             )

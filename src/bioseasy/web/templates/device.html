@@ -26,7 +26,7 @@
 
 {% if s.device.last_alert_ok == 0 %}
 <p class="flash bad">The last alert for this device could not be delivered{{ ": " ~ s.device.last_alert_error if s.device.last_alert_error else "" }}.
-  {% if user.is_admin %}Check the notification connectors in <a href="/devices/{{ s.device.udid }}/settings">Settings</a>.{% endif %}</p>
+  {% if user.is_admin %}Check the ntfy settings under <a href="/admin/notifications">Admin, Notifications</a>.{% endif %}</p>
 {% endif %}
 
 {% include "_ios_home_hint.html" %}

@@ -5,61 +5,46 @@
 {% block content %}
 <h1>Notifications</h1>
 {{ section_nav(admin_nav, request.url.path, "Admin") }}
-<p class="meta">Where alerts for every device go. A device can add its own connectors on its own
-  settings page; those are sent in addition to these.</p>
+{% if saved %}<p class="flash" role="status">Saved.</p>{% endif %}
 
-{% set scope = "admin" %}
-{% set base_url = "/admin/notifications" %}
-{% include "_connectors_section.html" %}
-
-<h2>Home Assistant (MQTT)</h2>
-<p class="meta">Publishes each device's backup state to an MQTT broker, with Home Assistant MQTT
-  discovery so entities appear on their own - no custom integration needed.</p>
-{# Collapsed like every connector above, and opened by the browser
-   itself whenever the form came back with errors, the same way _connectors_section.html does. #}
-<details class="connector" {% if mqtt_errors %}open{% endif %}>
-  <summary>Broker settings
-    <small>({% if not mqtt_settings.host %}not configured{% elif mqtt_settings.enabled %}{{ mqtt_settings.host }}, enabled{% else %}{{ mqtt_settings.host }}, disabled{% endif %})</small>
-  </summary>
-{% if mqtt_errors %}
-<ul class="flash bad">{% for e in mqtt_errors %}<li>{{ e }}</li>{% endfor %}</ul>
+<h2>ntfy</h2>
+<p class="meta">Every alert - a backup that finished or failed, a passcode to confirm, a backup that is
+  due or overdue, a storage problem - is published to one <a href="https://ntfy.sh" rel="noopener">ntfy</a>
+  topic. Install the ntfy app on your phone and subscribe to the same topic to receive them.</p>
+<p class="meta">On the public ntfy.sh server anyone who knows a topic name can read it, so pick a long,
+  unguessable one - or use your own ntfy server with an access token.</p>
+{% if ntfy_errors %}
+<ul class="flash bad" role="alert">{% for e in ntfy_errors %}<li>{{ e }}</li>{% endfor %}</ul>
 {% endif %}
-<form method="post" action="/admin/notifications/mqtt" class="stack">
+{% set nv = ntfy_values or {} %}
+<form method="post" action="/admin/notifications/ntfy" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label class="checkbox-row">
-    <input name="mqtt_enabled" type="checkbox" value="1" {% if mqtt_settings.enabled %}checked{% endif %}>
-    Enabled
+    <input name="enabled" type="checkbox" value="1" {% if (nv.enabled if ntfy_errors else ntfy_config.enabled) %}checked{% endif %}>
+    Send alerts
   </label>
-  <label>Broker host <input name="host" value="{{ mqtt_settings.host|default('') }}" maxlength="255"></label>
-  <label>Broker port <input name="port" type="number" min="1" max="65535" value="{{ mqtt_settings.port|default('1883') }}"></label>
-  <label class="checkbox-row">
-    <input name="tls" type="checkbox" value="1" {% if mqtt_settings.tls %}checked{% endif %}>
-    Use TLS
+  <label>Server
+    <input name="server" value="{{ nv.server if ntfy_errors else ntfy_config.server }}" maxlength="255" spellcheck="false" placeholder="https://ntfy.sh">
   </label>
-  <label>Username <small>(optional)</small>
-    <input name="username" value="{{ mqtt_settings.username|default('') }}" maxlength="254" autocomplete="off">
+  <label>Topic
+    <input name="topic" value="{{ nv.topic if ntfy_errors else ntfy_config.topic }}" maxlength="64" spellcheck="false" autocomplete="off">
   </label>
-  <label>Password <small>(optional, {% if mqtt_password_set %}set; leave blank to keep it{% else %}not set{% endif %})</small>
-    <input name="password" type="password" autocomplete="new-password">
+  <label>Access token <small>(optional, for a protected topic; {% if ntfy_config.token_set %}set - leave blank to keep it{% else %}not set{% endif %})</small>
+    <input name="token" type="password" autocomplete="new-password" spellcheck="false">
   </label>
-  <label>Base topic <input name="base_topic" value="{{ mqtt_settings.base_topic|default('bioseasy') }}" maxlength="64"></label>
-  <label>Discovery prefix <input name="discovery_prefix" value="{{ mqtt_settings.discovery_prefix|default('homeassistant') }}" maxlength="64"></label>
+  {% if ntfy_config.token_set %}
+  <label class="checkbox-row"><input name="clear_token" type="checkbox" value="1"> Remove the stored token</label>
+  {% endif %}
   <button class="button">Save</button>
 </form>
-<div id="mqtt-test">
-  <form hx-post="/admin/notifications/mqtt/test" hx-target="#mqtt-test" hx-swap="outerHTML">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="button">Send test state</button>
-  </form>
-</div>
-</details>
-
-<h2>Test all notifications</h2>
-<p class="meta">Sends to every admin connector above.</p>
+{% if ntfy_config.topic %}
+<p class="meta">Subscribe in the ntfy app to <code>{{ ntfy_config.subscribe_url }}</code>.</p>
+{% endif %}
 <div id="notify-test">
   <form hx-post="/admin/notifications/test" hx-target="#notify-test" hx-swap="outerHTML">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="button">Send test message</button>
+    <button class="button secondary">Send test message</button>
   </form>
 </div>
+
 {% endblock %}

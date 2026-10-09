@@ -23,12 +23,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from bioseasy import auth, connectors, db
-from bioseasy import notify as notify_mod
+from bioseasy import auth, db, ntfy
+from bioseasy import ntfy as notify_mod
 from bioseasy.app import create_app
 from bioseasy.config import Settings
 from bioseasy.engine.demo import DEMO_DEVICES, DemoEngine
-from bioseasy.notify import NotifyResult
+from bioseasy.ntfy import Result as NotifyResult
 from bioseasy.runtime import build as build_runtime
 
 PASSWORD = "correct horse battery"
@@ -71,14 +71,8 @@ def _build(tmp_path):
             "VALUES (?, ?, 1, 1000000, ?, ?)",
             (UDID, "Test iPhone", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
         )
-        connectors.create_connector(
-            conn,
-            scope="admin",
-            udid=None,
-            kind="apprise",
-            label="test",
-            settings={},
-            secret_ciphertext=connectors.encrypt_secret(rt.settings.data_dir, "json://192.0.2.1:1/hook"),
+        ntfy.save(
+            conn, rt.settings.data_dir, enabled=True, server="https://ntfy.invalid", topic="bioseasy-test", token=None
         )
     return rt
 
@@ -91,7 +85,7 @@ def _device_row(rt):
 def test_failing_sender_is_retried_at_the_cooldown_cadence_not_every_tick(tmp_path, monkeypatch):
     calls = []
 
-    def failing_send(urls, title, body):
+    def failing_send(conn, data_dir, title, body, **kwargs):
         calls.append(1)
         return NotifyResult(False, error="Sending the notification timed out")
 
@@ -121,7 +115,7 @@ def test_failing_sender_is_retried_at_the_cooldown_cadence_not_every_tick(tmp_pa
 
 
 def test_a_successful_send_behaves_exactly_as_today(tmp_path, monkeypatch):
-    def ok_send(urls, title, body):
+    def ok_send(conn, data_dir, title, body, **kwargs):
         return NotifyResult(True)
 
     monkeypatch.setattr(notify_mod, "send", ok_send)
@@ -143,7 +137,7 @@ def test_recovery_after_repeated_failures_is_recorded_once_it_succeeds(tmp_path,
     outcomes = iter([NotifyResult(False, error="boom"), NotifyResult(False, error="boom"), NotifyResult(True)])
     calls = []
 
-    def flaky_send(urls, title, body):
+    def flaky_send(conn, data_dir, title, body, **kwargs):
         calls.append(1)
         return next(outcomes)
 
@@ -180,7 +174,7 @@ def test_a_slow_older_attempt_never_overwrites_a_newer_verdict(tmp_path, monkeyp
 
     started = []
 
-    def ordered_send(urls, title, body):
+    def ordered_send(conn, data_dir, title, body, **kwargs):
         attempt = len(started)
         started.append(attempt)
         if attempt == 0:
@@ -211,7 +205,7 @@ def test_failed_delivery_state_survives_a_fresh_connection_like_a_worker_restart
     sqlite3 connection to the same file (db.connect), never resumes an in-process object, so the
     failed state must be readable back through exactly that path."""
 
-    def failing_send(urls, title, body):
+    def failing_send(conn, data_dir, title, body, **kwargs):
         return NotifyResult(False, error="Sending the notification failed")
 
     monkeypatch.setattr(notify_mod, "send", failing_send)
